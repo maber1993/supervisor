@@ -1,0 +1,17 @@
+#!/bin/bash
+
+while true; do
+  current_second=$(date +%S)
+  if [ "$current_second" -ge 45 ]; then
+    for i in {0..20000}; do
+      echo Test $i
+      sleep 0.0001
+      echo "Test error $i" >&2
+    done
+    break
+  else
+    echo "wait exec $current_second"
+    echo "wait exec $current_second" >&2
+    sleep 1
+  fi
+done

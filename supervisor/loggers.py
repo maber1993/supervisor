@@ -3,29 +3,34 @@ Logger implementation loosely modeled on PEP 282.  We don't use the
 PEP 282 logger implementation in the stdlib ('logging') because it's
 idiosyncratic and a bit slow for our purposes (we don't use threads).
 """
+import codecs
+import errno
+import gzip
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+from supervisor.compat import as_string
+from supervisor.compat import is_text_stream
+from supervisor.compat import long
+from supervisor.compat import syslog
+
 
 # This module must not depend on any non-stdlib modules to
 # avoid circular import problems
 
-import os
-import errno
-import sys
-import time
-import traceback
-
-from supervisor.compat import syslog
-from supervisor.compat import long
-from supervisor.compat import is_text_stream
-from supervisor.compat import as_string
 
 class LevelsByName:
-    CRIT = 50   # messages that probably require immediate user attention
-    ERRO = 40   # messages that indicate a potentially ignorable error condition
-    WARN = 30   # messages that indicate issues which aren't errors
-    INFO = 20   # normal informational output
-    DEBG = 10   # messages useful for users trying to debug configurations
-    TRAC = 5    # messages useful to developers trying to debug plugins
-    BLAT = 3    # messages useful for developers trying to debug supervisor
+    CRIT = 50  # messages that probably require immediate user attention
+    ERRO = 40  # messages that indicate a potentially ignorable error condition
+    WARN = 30  # messages that indicate issues which aren't errors
+    INFO = 20  # normal informational output
+    DEBG = 10  # messages useful for users trying to debug configurations
+    TRAC = 5  # messages useful to developers trying to debug plugins
+    BLAT = 3  # messages useful for developers trying to debug supervisor
+
 
 class LevelsByDescription:
     critical = LevelsByName.CRIT
@@ -36,6 +41,7 @@ class LevelsByDescription:
     trace = LevelsByName.TRAC
     blather = LevelsByName.BLAT
 
+
 def _levelNumbers():
     bynumber = {}
     for name, number in LevelsByName.__dict__.items():
@@ -43,11 +49,14 @@ def _levelNumbers():
             bynumber[number] = name
     return bynumber
 
+
 LOG_LEVELS_BY_NUM = _levelNumbers()
+
 
 def getLevelNumByDescription(description):
     num = getattr(LevelsByDescription, description, None)
     return num
+
 
 class Handler:
     fmt = '%(message)s'
@@ -81,7 +90,7 @@ class Handler:
                     # but calling it may raise io.UnsupportedOperation
                     pass
                 else:
-                    if fd < 3: # don't ever close stdout or stderr
+                    if fd < 3:  # don't ever close stdout or stderr
                         return
             self.stream.close()
             self.closed = True
@@ -115,6 +124,7 @@ class Handler:
         traceback.print_exception(ei[0], ei[1], ei[2], None, sys.stderr)
         del ei
 
+
 class StreamHandler(Handler):
     def __init__(self, strm=None):
         Handler.__init__(self, strm)
@@ -125,6 +135,7 @@ class StreamHandler(Handler):
 
     def reopen(self):
         pass
+
 
 class BoundIO:
     def __init__(self, maxbytes, buf=b''):
@@ -148,6 +159,7 @@ class BoundIO:
 
     def clear(self):
         self.buf = b''
+
 
 class FileHandler(Handler):
     """File handler which supports reopening of logs.
@@ -185,9 +197,10 @@ class FileHandler(Handler):
             if why.args[0] != errno.ENOENT:
                 raise
 
+
 class RotatingFileHandler(FileHandler):
-    def __init__(self, filename, mode='ab', maxBytes=512*1024*1024,
-                 backupCount=10):
+    def __init__(self, filename, mode='ab', maxBytes=512 * 1024 * 1024,
+                 backupCount=10, encoding=None):
         """
         Open the specified file and use it as the stream for logging.
 
@@ -209,12 +222,20 @@ class RotatingFileHandler(FileHandler):
         If maxBytes is zero, rollover never occurs.
         """
         if maxBytes > 0:
-            mode = 'ab' # doesn't make sense otherwise!
-        FileHandler.__init__(self, filename, mode)
+            self.mode = 'ab'  # doesn't make sense otherwise!
+        self.base_log_path = Path(filename)
+        self.suffix = "%Y-%m-%d-%H-%M"
+        self.base_filename = self.base_log_path.name
+        self.baseFilename = os.path.abspath(filename)
         self.maxBytes = maxBytes
+        self.current_filename = self._compute_fn()
+        self.current_log_path = self.base_log_path.with_name(self.current_filename)
+        # FileHandler.__init__(self, self.current_log_path, mode)
         self.backupCount = backupCount
+        self.encoding = encoding
         self.counter = 0
         self.every = 10
+        Handler.__init__(self, self._open())
 
     def emit(self, record):
         """
@@ -226,54 +247,68 @@ class RotatingFileHandler(FileHandler):
         FileHandler.emit(self, record)
         self.doRollover()
 
-    def _remove(self, fn): # pragma: no cover
-        # this is here to service stubbing in unit tests
-        return os.remove(fn)
+    def _compute_fn(self):
+        return self.base_filename + "." + time.strftime(self.suffix, time.localtime())
 
-    def _rename(self, src, tgt): # pragma: no cover
-        # this is here to service stubbing in unit tests
-        return os.rename(src, tgt)
+    def _open(self):
+        if self.encoding is None or self.encoding == 'locale':
+            stream = open(str(self.current_log_path), self.mode)
+        else:
+            stream = codecs.open(str(self.current_log_path), self.mode, self.encoding)
 
-    def _exists(self, fn): # pragma: no cover
-        # this is here to service stubbing in unit tests
-        return os.path.exists(fn)
-
-    def removeAndRename(self, sfn, dfn):
-        if self._exists(dfn):
+        if self.base_log_path.exists():
             try:
-                self._remove(dfn)
-            except OSError as why:
-                # catch race condition (destination already deleted)
-                if why.args[0] != errno.ENOENT:
-                    raise
+                if not self.base_log_path.is_symlink() or os.readlink(self.base_log_path) != self.current_filename:
+                    os.remove(self.base_log_path)
+            except OSError:
+                pass
         try:
-            self._rename(sfn, dfn)
-        except OSError as why:
-            # catch exceptional condition (source deleted)
-            # E.g. cleanup script removes active log.
-            if why.args[0] != errno.ENOENT:
-                raise
+            os.symlink(self.current_filename, str(self.base_log_path))
+        except OSError:
+            pass
+        return stream
 
     def doRollover(self):
-        """
-        Do a rollover, as described in __init__().
-        """
-        if self.maxBytes <= 0:
+        if self.current_filename == self._compute_fn():
+            return
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        old_filename = self.current_filename
+        self.current_filename = self._compute_fn()
+        self.current_log_path = self.base_log_path.with_name(self.current_filename)
+        self.stream = self._open()
+        self.compress_logs(filename=old_filename)
+        self.delete_expired_files()
+
+    def delete_expired_files(self):
+        if self.backupCount <= 0:
             return
 
-        if not (self.stream.tell() >= self.maxBytes):
-            return
+        prefix = self.baseFilename + "."
+        suffix = ".gz"
+        file_names = [
+            filename for filename in self.base_log_path.parent.iterdir()
+            if filename.name.endswith(suffix) and filename.name.startswith(prefix)
+        ]
 
-        self.stream.close()
-        if self.backupCount > 0:
-            for i in range(self.backupCount - 1, 0, -1):
-                sfn = "%s.%d" % (self.baseFilename, i)
-                dfn = "%s.%d" % (self.baseFilename, i + 1)
-                if os.path.exists(sfn):
-                    self.removeAndRename(sfn, dfn)
-            dfn = self.baseFilename + ".1"
-            self.removeAndRename(self.baseFilename, dfn)
-        self.stream = open(self.baseFilename, 'wb')
+        if len(file_names) > self.backupCount:
+            file_names.sort()
+            files_to_delete = file_names[:-self.backupCount]
+
+            for file_path in files_to_delete:
+                file_path.unlink()
+
+    def compress_logs(self, filename: str):
+        filename = self.base_log_path.with_name(filename)
+        if filename.exists() and not filename.suffix == ".gz":
+            # Compress the file
+            compressed_file_path = f'{filename}.gz'
+            with filename.open('rb') as f_in, gzip.open(compressed_file_path, 'wb') as f_out:
+                f_out.writelines(f_in)
+
+            filename.unlink()
+
 
 class LogRecord:
     def __init__(self, level, msg, **kw):
@@ -292,9 +327,10 @@ class LogRecord:
             msg = as_string(self.msg)
             if self.kw:
                 msg = msg % self.kw
-            self.dictrepr = {'message':msg, 'levelname':levelname,
-                             'asctime':asctime}
+            self.dictrepr = {'message': msg, 'levelname': levelname,
+                             'asctime': asctime}
         return self.dictrepr
+
 
 class Logger:
     def __init__(self, level=None, handlers=None):
@@ -350,6 +386,7 @@ class Logger:
     def getvalue(self):
         raise NotImplementedError
 
+
 class SyslogHandler(Handler):
     def __init__(self):
         Handler.__init__(self)
@@ -361,7 +398,7 @@ class SyslogHandler(Handler):
     def reopen(self):
         pass
 
-    def _syslog(self, msg): # pragma: no cover
+    def _syslog(self, msg):  # pragma: no cover
         # this exists only for unit test stubbing
         syslog.syslog(msg)
 
@@ -379,10 +416,13 @@ class SyslogHandler(Handler):
         except:
             self.handleError()
 
+
 def getLogger(level=None):
     return Logger(level)
 
-_2MB = 1<<21
+
+_2MB = 1 << 21
+
 
 def handle_boundIO(logger, fmt, maxbytes=_2MB):
     """Attach a new BoundIO handler to an existing Logger"""
@@ -393,12 +433,14 @@ def handle_boundIO(logger, fmt, maxbytes=_2MB):
     logger.addHandler(handler)
     logger.getvalue = io.getvalue
 
+
 def handle_stdout(logger, fmt):
     """Attach a new StreamHandler with stdout handler to an existing Logger"""
     handler = StreamHandler(sys.stdout)
     handler.setFormat(fmt)
     handler.setLevel(logger.level)
     logger.addHandler(handler)
+
 
 def handle_syslog(logger, fmt):
     """Attach a new Syslog handler to an existing Logger"""
@@ -407,16 +449,14 @@ def handle_syslog(logger, fmt):
     handler.setLevel(logger.level)
     logger.addHandler(handler)
 
+
 def handle_file(logger, filename, fmt, rotating=False, maxbytes=0, backups=0):
     """Attach a new file handler to an existing Logger. If the filename
     is the magic name of 'syslog' then make it a syslog handler instead."""
-    if filename == 'syslog': # TODO remove this
-        handler = SyslogHandler()
+    if rotating is False:
+        handler = FileHandler(filename)
     else:
-        if rotating is False:
-            handler = FileHandler(filename)
-        else:
-            handler = RotatingFileHandler(filename, 'a', maxbytes, backups)
+        handler = RotatingFileHandler(filename, 'a', maxbytes, backups)
     handler.setFormat(fmt)
     handler.setLevel(logger.level)
     logger.addHandler(handler)
