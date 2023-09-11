@@ -11,17 +11,18 @@ from supervisor.states import EventListenerStates
 from supervisor.states import getEventListenerStateDescription
 from supervisor import loggers
 
+
 class PDispatcher:
     """ Asyncore dispatcher for mainloop, representing a process channel
     (stdin, stdout, or stderr).  This class is abstract. """
 
-    closed = False # True if close() has been called
+    closed = False  # True if close() has been called
 
     def __init__(self, process, channel, fd):
         self.process = process  # process which "owns" this dispatcher
         self.channel = channel  # 'stderr' or 'stdout'
         self.fd = fd
-        self.closed = False     # True if close() has been called
+        self.closed = False  # True if close() has been called
 
     def __repr__(self):
         return '<%s at %s for %s (%s)>' % (self.__class__.__name__,
@@ -50,8 +51,8 @@ class PDispatcher:
                 t,
                 v,
                 tbinfo
-                )
             )
+        )
         self.close()
 
     def close(self):
@@ -62,6 +63,7 @@ class PDispatcher:
 
     def flush(self):
         pass
+
 
 class POutputDispatcher(PDispatcher):
     """
@@ -75,11 +77,11 @@ class POutputDispatcher(PDispatcher):
       config.
     """
 
-    childlog = None # the current logger (normallog or capturelog)
-    normallog = None # the "normal" (non-capture) logger
-    capturelog = None # the logger used while we're in capturemode
-    capturemode = False # are we capturing process event data
-    output_buffer = b'' # data waiting to be logged
+    childlog = None  # the current logger (normallog or capturelog)
+    normallog = None  # the "normal" (non-capture) logger
+    capturelog = None  # the logger used while we're in capturemode
+    capturemode = False  # are we capturing process event data
+    output_buffer = b''  # data waiting to be logged
 
     def __init__(self, process, event_type, fd):
         """
@@ -121,7 +123,7 @@ class POutputDispatcher(PDispatcher):
         maxbytes = getattr(config, '%s_logfile_maxbytes' % channel)
         backups = getattr(config, '%s_logfile_backups' % channel)
         to_syslog = getattr(config, '%s_syslog' % channel)
-
+        when = getattr(config, 'when')
         if logfile or to_syslog:
             self.normallog = config.options.getLogger()
 
@@ -130,9 +132,10 @@ class POutputDispatcher(PDispatcher):
                 self.normallog,
                 filename=logfile,
                 fmt='%(message)s',
-                rotating=not not maxbytes, # optimization
+                rotating=not not maxbytes,  # optimization
                 maxbytes=maxbytes,
-                backups=backups
+                backups=backups,
+                when=when
             )
 
         if to_syslog:
@@ -155,7 +158,7 @@ class POutputDispatcher(PDispatcher):
                 self.capturelog,
                 fmt='%(message)s',
                 maxbytes=capture_maxbytes,
-                )
+            )
 
     def removelogs(self):
         for log in (self.normallog, self.capturelog):
@@ -193,13 +196,13 @@ class POutputDispatcher(PDispatcher):
                 if self.stdout_events_enabled:
                     notify(
                         ProcessLogStdoutEvent(self.process,
-                            self.process.pid, data)
+                                              self.process.pid, data)
                     )
-            else: # channel == stderr
+            else:  # channel == stderr
                 if self.stderr_events_enabled:
                     notify(
                         ProcessLogStderrEvent(self.process,
-                            self.process.pid, data)
+                                              self.process.pid, data)
                     )
 
     def record_output(self):
@@ -216,7 +219,7 @@ class POutputDispatcher(PDispatcher):
             token, tokenlen = self.begintoken_data
 
         if len(self.output_buffer) <= tokenlen:
-            return # not enough data
+            return  # not enough data
 
         data = self.output_buffer
         self.output_buffer = b''
@@ -280,10 +283,11 @@ class POutputDispatcher(PDispatcher):
             # mail.python.org/pipermail/python-dev/2004-August/046850.html
             self.close()
 
+
 class PEventListenerDispatcher(PDispatcher):
     """ An output dispatcher that monitors and changes a process'
     listener_state """
-    childlog = None # the logger
+    childlog = None  # the logger
     state_buffer = b''  # data waiting to be reviewed for state changes
 
     READY_FOR_EVENTS_TOKEN = b'READY\n'
@@ -301,18 +305,19 @@ class PEventListenerDispatcher(PDispatcher):
         self.resultlen = None
 
         logfile = getattr(process.config, '%s_logfile' % channel)
-
         if logfile:
             maxbytes = getattr(process.config, '%s_logfile_maxbytes' % channel)
             backups = getattr(process.config, '%s_logfile_backups' % channel)
+            when = getattr(process.config, 'when')
             self.childlog = process.config.options.getLogger()
             loggers.handle_file(
                 self.childlog,
                 logfile,
                 '%(message)s',
-                rotating=not not maxbytes, # optimization
+                rotating=not not maxbytes,  # optimization
                 maxbytes=maxbytes,
                 backups=backups,
+                when=when
             )
 
     def removelogs(self):
@@ -325,7 +330,6 @@ class PEventListenerDispatcher(PDispatcher):
         if self.childlog is not None:
             for handler in self.childlog.handlers:
                 handler.reopen()
-
 
     def writable(self):
         return False
@@ -406,7 +410,7 @@ class PEventListenerDispatcher(PDispatcher):
                     return
 
                 result_line = self.state_buffer[:pos]
-                self.state_buffer = self.state_buffer[pos+1:] # rid LF
+                self.state_buffer = self.state_buffer[pos + 1:]  # rid LF
                 resultlen = result_line[self.RESULT_TOKEN_START_LEN:]
                 try:
                     self.resultlen = int(resultlen)
@@ -417,7 +421,7 @@ class PEventListenerDispatcher(PDispatcher):
                         result_line = 'Undecodable: %r' % result_line
                     process.config.options.logger.warn(
                         '%s: bad result line: \'%s\'' % (procname, result_line)
-                        )
+                    )
                     self._change_listener_state(EventListenerStates.UNKNOWN)
                     self.state_buffer = b''
                     notify(EventRejectedEvent(process, process.event))
@@ -469,7 +473,7 @@ class PEventListenerDispatcher(PDispatcher):
             procname,
             getEventListenerStateDescription(old_state),
             getEventListenerStateDescription(new_state)
-            )
+        )
         process.config.options.logger.debug(msg)
 
         process.listener_state = new_state
@@ -478,6 +482,7 @@ class PEventListenerDispatcher(PDispatcher):
                    'receive events, this usually indicates the process '
                    'violated the eventlistener protocol' % procname)
             process.config.options.logger.warn(msg)
+
 
 class PInputDispatcher(PDispatcher):
     """ Input (stdin) dispatcher """
@@ -511,9 +516,11 @@ class PInputDispatcher(PDispatcher):
                 else:
                     raise
 
+
 ANSI_ESCAPE_BEGIN = b'\x1b['
 ANSI_TERMINATORS = (b'H', b'f', b'A', b'B', b'C', b'D', b'R', b's', b'u', b'J',
                     b'K', b'h', b'l', b'p', b'm')
+
 
 def stripEscapes(s):
     """
@@ -537,9 +544,11 @@ def stripEscapes(s):
         i += 1
     return result
 
+
 class RejectEvent(Exception):
     """ The exception type expected by a dispatcher when a handler wants
     to reject an event """
+
 
 def default_handler(event, response):
     if response != b'OK':
